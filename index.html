@@ -74,6 +74,9 @@
         <label>Sala
           <input type="text" id="room0" maxlength="30" autocomplete="off" value="general">
         </label>
+        <div class="hint" id="exists"></div>
+        <div>Salas activas (toca una para entrar)</div>
+        <div class="inset list" id="rooms0" style="height:110px"></div>
         <button id="enter">Entrar</button>
         <div class="hint">Sin cuenta ni contraseña. Quien conozca el nombre de una sala puede entrar. Los mensajes no se guardan: solo los ven quienes están conectados.</div>
       </div>
@@ -90,6 +93,7 @@
           <input type="text" id="newroom" maxlength="30" placeholder="Nueva sala" autocomplete="off">
           <button id="go">Ir</button>
         </div>
+        <div class="hint" id="exists2"></div>
         <label class="opt"><input type="checkbox" id="hidden"> Sala oculta (no aparece en la lista)</label>
       </div>
       <div class="col">
@@ -151,18 +155,36 @@ function renderUsers(){
   names.forEach(n=>{ const d=el('div',null,n); d.style.color=color(n); if(n===nick) d.style.fontWeight='bold'; box.append(d); });
   $('cnt').textContent = `${names.length} en la sala`;
 }
+function roomCount(name){ let n = 0; for(const r of lobbyMap.values()) if(r === name) n++; return n; }
+function hint(inputId, hintId){
+  const r = cleanRoom($(inputId).value), h = $(hintId);
+  if(!r){ h.textContent = ''; return; }
+  const n = roomCount(r) + (r === current && !hidden ? 1 : 0);
+  h.textContent = n > 0
+    ? `#${r} ya existe (${n} conectado${n>1?'s':''}). Entrarás a esa sala.`
+    : `#${r} no aparece activa: se creará al entrar.`;
+}
+const updateHints = () => { hint('room0','exists'); hint('newroom','exists2'); };
 function renderRooms(){
   const counts = new Map();
   for(const r of lobbyMap.values()) counts.set(r,(counts.get(r)||0)+1);
   if(current && !hidden) counts.set(current,(counts.get(current)||0)+1);
   if(!counts.has('general')) counts.set('general',0);
-  const box = $('rooms'); box.replaceChildren();
-  [...counts.entries()].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0])).forEach(([r,n])=>{
-    const d = el('div', r===current?'cur':'', `#${r} (${n})`);
-    d.title = `Entrar a #${r}`;
-    d.onclick = () => enter(r);
-    box.append(d);
-  });
+  const sorted = [...counts.entries()].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]));
+  for(const [boxId, inLogin] of [['rooms',false],['rooms0',true]]){
+    const box = $(boxId); box.replaceChildren();
+    sorted.forEach(([r,n])=>{
+      const d = el('div', !inLogin && r===current ? 'cur' : '', `#${r} (${n})`);
+      d.title = `Entrar a #${r}`;
+      d.onclick = () => {
+        if(!inLogin) return enter(r);
+        $('room0').value = r; updateHints();
+        cleanNick($('nick').value) ? login() : $('nick').focus();
+      };
+      box.append(d);
+    });
+  }
+  updateHints();
 }
 
 /* ---------- Lobby: descubrir salas activas ---------- */
@@ -209,7 +231,10 @@ async function enter(name){
     if(text) chat(who, text, !!(d && d.me));
   });
 
-  sys(`Entraste a #${name}. Comparte el nombre de la sala (o este enlace) para invitar a otros.`);
+  const ex = roomCount(name);
+  sys(ex > 0
+    ? `Entraste a #${name}, una sala que ya existía (${ex} persona${ex>1?'s':''} conectada${ex>1?'s':''}).`
+    : `Creaste #${name}. Comparte el nombre de la sala (o este enlace) para invitar a otros.`);
   renderUsers(); renderRooms(); announce();
   $('st').textContent = 'Conectado (P2P). Si estás solo, espera a que alguien entre.';
   $('msg').focus();
@@ -241,7 +266,7 @@ function login(){
   nick = n; store.set('nick', n);
   const r = cleanRoom($('room0').value) || 'general';
   $('login').style.display = 'none'; $('app').style.display = 'flex';
-  startLobby(); enter(r);
+  enter(r);
 }
 $('enter').onclick = login;
 ['nick','room0'].forEach(id => $(id).addEventListener('keydown', e => { if(e.key==='Enter') login(); }));
@@ -256,6 +281,8 @@ window.addEventListener('pagehide', () => { try{ room && room.leave(); }catch{} 
 // Valores iniciales
 $('nick').value = store.get('nick') || '';
 const h0 = cleanRoom(location.hash.slice(1)); if(h0) $('room0').value = h0;
+['room0','newroom'].forEach(id => $(id).addEventListener('input', updateHints));
+startLobby(); renderRooms();
 </script>
 </body>
 </html>
