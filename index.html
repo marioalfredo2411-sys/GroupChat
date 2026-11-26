@@ -71,6 +71,7 @@
       <div class="body">
         <div>Toca una sala para entrar</div>
         <div class="inset list" id="rooms0" style="height:200px"></div>
+        <div class="hint" id="lst"></div>
         <div style="display:flex;gap:4px">
           <input type="text" id="room0" maxlength="30" placeholder="Nombre de una sala nueva" autocomplete="off" style="flex:1">
           <button id="enter">Crear</button>
@@ -129,17 +130,23 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script type="module">
-import { joinRoom } from 'https://cdn.jsdelivr.net/npm/trystero@0.21.5/+esm';
+/* ---- Configuración ---- */
+const NS = 'chatclasico-v1';   // cambia esto para tener tu propia “red” de salas
+const BROKERS = ['wss://broker.hivemq.com:8884/mqtt', 'wss://broker.emqx.io:8084/mqtt'];  // brokers MQTT públicos (se usa el primero que conecte)
+const TTL = 90000;             // ms sin señales de vida para dar a alguien por desconectado
 
-const APP = { appId: 'chat-clasico-ghpages-v1' };   // cambia esto para tener tu propia “red” de salas
 const $ = id => document.getElementById(id);
 const store = { get(k){ try{return localStorage.getItem(k)}catch{return null} }, set(k,v){ try{localStorage.setItem(k,v)}catch{} } };
+const rnd = () => Math.random().toString(36).slice(2,10);
+const ME = (() => { try{ let v = sessionStorage.getItem('cid'); if(!v){ v = rnd(); sessionStorage.setItem('cid', v); } return v; }catch{ return rnd(); } })();
+const PT = `${NS}/p/${ME}`;                    // mi tema de presencia
+const msgTopic = r => `${NS}/m/${r}`;          // tema de mensajes de una sala
 
-let nick = '', current = null, room = null, hidden = false;
-let peers = new Map();            // id -> alias en la sala actual
-let lobbyMap = new Map();         // id -> sala anunciada
-let sendState, sendMsg, sendHi;
+let nick = '', current = null, hidden = false;
+let client = null, bi = 0, failures = 0, everConnected = false;
+const pres = new Map();   // id -> {n, r, h, ts, seen}  (otras personas conectadas)
 
 const cleanNick = s => (s||'').replace(/[\u0000-\u001f<>]/g,'').trim().slice(0,20);
 const cleanRoom = s => (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
@@ -148,9 +155,9 @@ const hhmm = () => new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-
 const color = n => { let h=0; for(const c of n) h=(h*31+c.charCodeAt(0))>>>0; return `hsl(${h%360} 70% 30%)`; };
 
 /* ---------- Registro de mensajes ---------- */
-function line(html){ // html construido con nodos, nunca con texto del usuario
+function line(node){
   const log = $('log'), stick = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-  log.appendChild(html);
+  log.appendChild(node);
   if(stick) log.scrollTop = log.scrollHeight;
 }
 function el(tag, cls, text){ const e=document.createElement(tag); if(cls) e.className=cls; if(text!=null) e.textContent=text; return e; }
@@ -163,14 +170,17 @@ function chat(who, text, isMe){
   line(d);
 }
 
-/* ---------- Lista de usuarios y salas ---------- */
+/* ---------- Presencia, usuarios y salas ---------- */
+function usersIn(room){ return [...pres.values()].filter(p => p.r === room); }
+function roomCount(name){ return usersIn(name).filter(p => !p.h).length; }
+
 function renderUsers(){
   const box = $('users'); box.replaceChildren();
-  const names = [nick, ...peers.values()].sort((a,b)=>a.localeCompare(b,'es'));
-  names.forEach(n=>{ const d=el('div',null,n); d.style.color=color(n); if(n===nick) d.style.fontWeight='bold'; box.append(d); });
+  if(!current){ $('cnt').textContent = ''; return; }
+  const names = [nick, ...usersIn(current).map(p => p.n)].sort((a,b)=>a.localeCompare(b,'es'));
+  names.forEach(n=>{ const d=el('div',null,n); d.style.color=color(n); if(n===nick) d.style.fontWeight='bold'; $('users').append(d); });
   $('cnt').textContent = `${names.length} en la sala`;
 }
-function roomCount(name){ let n = 0; for(const r of lobbyMap.values()) if(r === name) n++; return n; }
 function hint(inputId, hintId){
   const r = cleanRoom($(inputId).value), h = $(hintId);
   if(!r){ h.textContent = ''; return; }
@@ -182,73 +192,116 @@ function hint(inputId, hintId){
 const updateHints = () => { hint('room0','exists'); hint('newroom','exists2'); };
 function renderRooms(){
   const counts = new Map();
-  for(const r of lobbyMap.values()) counts.set(r,(counts.get(r)||0)+1);
+  for(const p of pres.values()) if(!p.h) counts.set(p.r,(counts.get(p.r)||0)+1);
   if(current && !hidden) counts.set(current,(counts.get(current)||0)+1);
   if(!counts.has('general')) counts.set('general',0);
   const sorted = [...counts.entries()].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]));
-  for(const [boxId, inLogin] of [['rooms',false],['rooms0',true]]){
+  for(const [boxId, inLobby] of [['rooms',false],['rooms0',true]]){
     const box = $(boxId); box.replaceChildren();
     sorted.forEach(([r,n])=>{
-      const d = el('div', !inLogin && r===current ? 'cur' : '', `#${r} (${n})`);
+      const d = el('div', !inLobby && r===current ? 'cur' : '', `#${r} (${n})`);
       d.title = `Entrar a #${r}`;
-      d.onclick = () => inLogin ? ask(r, false) : enter(r);
+      d.onclick = () => inLobby ? ask(r, false) : enter(r);
       box.append(d);
     });
   }
   updateHints();
 }
-
-/* ---------- Lobby: descubrir salas activas ---------- */
-function startLobby(){
-  const lobby = joinRoom(APP, 'lobby');
-  const [s, g] = lobby.makeAction('state');
-  sendState = s;
-  lobby.onPeerJoin(id => sendState({ room: hidden ? null : current }, id));
-  lobby.onPeerLeave(id => { lobbyMap.delete(id); renderRooms(); });
-  g((d,id) => { d && d.room ? lobbyMap.set(id, cleanRoom(d.room)) : lobbyMap.delete(id); renderRooms(); });
+function notify(old, d){
+  if(!current) return;
+  const was = old && old.r === current, is = d && d.r === current;
+  if(!was && is) sys(`${d.n} entró a la sala`);
+  else if(was && !is) sys(`${old.n} salió de la sala`);
+  else if(was && is && old.n !== d.n) sys(`${old.n} ahora es ${d.n}`);
 }
-const announce = () => sendState && sendState({ room: hidden ? null : current });
+function onPresence(id, buf){
+  if(id === ME) return;
+  const txt = buf.toString(), old = pres.get(id);
+  let d = null;
+  if(txt){ try{ d = JSON.parse(txt); }catch{} }
+  if(d && (typeof d.ts !== 'number' || Date.now() - d.ts > TTL)) d = null;       // señal vieja: ignorar
+  if(d){ d = { n: cleanNick(d.n) || 'anónimo', r: cleanRoom(d.r), h: !!d.h, ts: d.ts, seen: Date.now() }; if(!d.r) d = null; }
+  d ? pres.set(id, d) : pres.delete(id);
+  notify(old, d); renderUsers(); renderRooms();
+}
+function presence(){
+  if(!client || !client.connected) return;
+  client.publish(PT, current ? JSON.stringify({ n: nick, r: current, h: hidden ? 1 : 0, ts: Date.now() }) : '', { retain: true });
+}
+setInterval(presence, 25000);
+setInterval(() => {                                   // quitar a quien dejó de dar señales
+  let changed = false;
+  for(const [id, p] of pres) if(Date.now() - p.seen > TTL){ pres.delete(id); notify(p, null); changed = true; }
+  if(changed){ renderUsers(); renderRooms(); }
+}, 15000);
+
+/* ---------- Conexión al broker ---------- */
+function setStatus(){
+  const ok = client && client.connected;
+  const t = ok ? 'Conectado al servidor. Los mensajes no se guardan.' : (everConnected ? 'Sin conexión, reconectando…' : 'Conectando al servidor…');
+  $('st').textContent = t; $('lst').textContent = ok ? '' : t;
+}
+function connect(){
+  if(!window.mqtt){ $('lst').textContent = 'No se pudo cargar la librería de conexión. Revisa tu internet.'; return; }
+  const url = BROKERS[bi % BROKERS.length];
+  client = window.mqtt.connect(url, {
+    clientId: `cc-${ME}`, clean: true, keepalive: 30, connectTimeout: 8000, reconnectPeriod: 3000,
+    will: { topic: PT, payload: '', retain: true, qos: 0 }
+  });
+  const mine = client;
+  client.on('connect', () => {
+    failures = 0; everConnected = true; setStatus();
+    mine.subscribe(`${NS}/p/+`);
+    if(current) mine.subscribe(msgTopic(current));
+    presence();
+  });
+  client.on('close', () => {
+    setStatus();
+    if(!everConnected && ++failures >= 2 && BROKERS.length > 1){   // el servidor no responde: probar el siguiente
+      mine.end(true); bi++; failures = 0; connect();
+    }
+  });
+  client.on('message', (topic, buf) => {
+    const parts = topic.split('/');
+    if(parts[1] === 'p'){ onPresence(parts[2], buf); return; }
+    if(parts[1] === 'm' && parts[2] === current){
+      let d; try{ d = JSON.parse(buf.toString()); }catch{ return; }
+      if(!d || d.c === ME) return;                                     // ignorar mis propios mensajes
+      const text = String(d.t || '').slice(0, 500);
+      if(text) chat(cleanNick(d.n) || 'anónimo', text, !!d.me);
+    }
+  });
+}
 
 /* ---------- Salas ---------- */
-async function enter(name){
+function enter(name){
   name = cleanRoom(name);
   if(!name){ sys('Nombre de sala no válido. Usa letras, números, - o _.'); return; }
   if(name === current) return;
-  if(room){ try{ await room.leave(); }catch{} }
-  peers = new Map(); $('log').replaceChildren();
+  if(current && client) client.unsubscribe(msgTopic(current));
+  $('log').replaceChildren();
   current = name; hidden = $('hidden').checked;
   history.replaceState(null,'','#'+name);
   $('topic').textContent = `#${name}`;
   $('who').textContent = nick;
   document.title = `#${name} · Chat Clásico`;
   $('side').classList.remove('open');
-
-  room = joinRoom(APP, 'r:' + name);
-  let m, h;
-  [sendMsg, m] = room.makeAction('msg');
-  [sendHi,  h] = room.makeAction('hi');
-
-  room.onPeerJoin(id => sendHi({ nick }, id));
-  room.onPeerLeave(id => { const n = peers.get(id); peers.delete(id); if(n) sys(`${n} salió de la sala`); renderUsers(); renderRooms(); });
-  h((d,id) => {
-    const n = cleanNick(d && d.nick) || 'anónimo', old = peers.get(id);
-    peers.set(id, n);
-    if(!old) sys(`${n} entró a la sala`); else if(old !== n) sys(`${old} ahora es ${n}`);
-    renderUsers();
-  });
-  m((d,id) => {
-    const who = peers.get(id) || 'anónimo';
-    const text = String((d && d.t) || '').slice(0,500);
-    if(text) chat(who, text, !!(d && d.me));
-  });
-
-  const ex = roomCount(name);
+  if(client && client.connected) client.subscribe(msgTopic(name));
+  const ex = usersIn(name).length;
   sys(ex > 0
     ? `Entraste a #${name}, una sala que ya existía (${ex} persona${ex>1?'s':''} conectada${ex>1?'s':''}).`
     : `Creaste #${name}. Comparte el nombre de la sala (o este enlace) para invitar a otros.`);
-  renderUsers(); renderRooms(); announce();
-  $('st').textContent = 'Conectado (P2P). Si estás solo, espera a que alguien entre.';
+  setStatus(); presence(); renderUsers(); renderRooms();
   $('msg').focus();
+}
+function backToLobby(){
+  if(current && client) client.unsubscribe(msgTopic(current));
+  current = null; hidden = false; $('hidden').checked = false;
+  presence();
+  $('app').style.display = 'none'; $('login').style.display = '';
+  $('who').textContent = ''; document.title = 'Chat Clásico';
+  history.replaceState(null, '', location.pathname);
+  renderRooms();
 }
 
 /* ---------- Envío y comandos ---------- */
@@ -259,8 +312,8 @@ function submit(text){
     switch(cmd.toLowerCase()){
       case 'nick': { const n = cleanNick(arg); if(!n) return sys('Uso: /nick NuevoAlias');
         const old = nick; nick = n; store.set('nick', n); $('who').textContent = n;
-        sendHi && sendHi({ nick }); sys(`Ahora eres ${n} (antes ${old})`); renderUsers(); return; }
-      case 'me':   if(!arg) return sys('Uso: /me hace algo'); sendMsg({ t: arg, me: 1 }); chat(nick, arg, true); return;
+        sys(`Ahora eres ${n} (antes ${old})`); presence(); renderUsers(); return; }
+      case 'me':   if(!arg) return sys('Uso: /me hace algo'); return send(arg, true);
       case 'join': case 'sala': return enter(arg);
       case 'lobby': return backToLobby();
       case 'ayuda': case 'help':
@@ -268,7 +321,12 @@ function submit(text){
       default: return sys(`Comando desconocido: /${cmd}. Escribe /ayuda`);
     }
   }
-  sendMsg({ t: text }); chat(nick, text, false);
+  send(text, false);
+}
+function send(text, me){
+  if(!client || !client.connected){ sys('Sin conexión con el servidor: el mensaje no se envió.'); return; }
+  client.publish(msgTopic(current), JSON.stringify({ c: ME, n: nick, t: text, me: me ? 1 : 0 }));
+  chat(nick, text, me);
 }
 
 /* ---------- Eventos ---------- */
@@ -289,15 +347,6 @@ function confirmNick(){
   const r = pending.r; pending = null;
   enter(r);
 }
-async function backToLobby(){
-  if(room){ try{ await room.leave(); }catch{} }
-  room = null; current = null; peers = new Map(); hidden = false; $('hidden').checked = false;
-  announce();
-  $('app').style.display = 'none'; $('login').style.display = '';
-  $('who').textContent = ''; document.title = 'Chat Clásico';
-  history.replaceState(null, '', location.pathname);
-  renderRooms();
-}
 function create(){
   const r = cleanRoom($('room0').value);
   if(!r){ $('room0').focus(); return; }
@@ -312,16 +361,16 @@ $('nick').addEventListener('keydown', e => { if(e.key==='Enter') confirmNick(); 
 $('back').onclick = backToLobby;
 $('go').onclick = () => { const v = $('newroom').value; $('newroom').value=''; enter(v); };
 $('newroom').addEventListener('keydown', e => { if(e.key==='Enter'){ e.preventDefault(); $('go').click(); } });
-$('hidden').onchange = () => { hidden = $('hidden').checked; announce(); renderRooms(); };
+$('hidden').onchange = () => { hidden = $('hidden').checked; presence(); renderRooms(); };
 $('form').onsubmit = e => { e.preventDefault(); submit($('msg').value); $('msg').value=''; };
 $('menu').onclick = () => $('side').classList.toggle('open');
 window.addEventListener('hashchange', () => { const r = cleanRoom(location.hash.slice(1)); if(r && nick) enter(r); });
-window.addEventListener('pagehide', () => { try{ room && room.leave(); }catch{} });
-
-// Valores iniciales
-const h0 = cleanRoom(location.hash.slice(1));
+window.addEventListener('pagehide', () => { try{ if(client && client.connected) client.publish(PT, '', { retain: true }); }catch{} });
 ['room0','newroom'].forEach(id => $(id).addEventListener('input', updateHints));
-startLobby(); renderRooms();
+
+// Inicio
+const h0 = cleanRoom(location.hash.slice(1));
+connect(); setStatus(); renderRooms();
 if(h0) ask(h0, false);
 </script>
 </body>
