@@ -47,6 +47,7 @@
   .send{display:flex;gap:4px}
   .send input{flex:1}
   .status{font-size:12px;padding:2px 4px;border:2px solid;border-color:var(--lo) var(--hi) var(--hi) var(--lo);display:flex;justify-content:space-between;gap:8px}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.35);display:none;align-items:center;justify-content:center;z-index:10}
   @media (max-width:720px){
     body{padding:0}
     .win{height:100%}
@@ -63,22 +64,35 @@
 <div class="win" id="win">
   <div class="bar"><span>Chat Clásico</span><small id="who"></small></div>
 
-  <!-- Entrada -->
+  <!-- Lobby -->
   <div class="login" id="login">
     <div class="win" style="height:auto;width:100%;box-shadow:none">
-      <div class="bar"><span>Entrar al chat</span></div>
+      <div class="bar"><span>Lobby: salas creadas</span></div>
       <div class="body">
-        <label>Tu nombre o alias
-          <input type="text" id="nick" maxlength="20" autocomplete="off" autofocus>
-        </label>
-        <label>Sala
-          <input type="text" id="room0" maxlength="30" autocomplete="off" value="general">
-        </label>
+        <div>Toca una sala para entrar</div>
+        <div class="inset list" id="rooms0" style="height:200px"></div>
+        <div style="display:flex;gap:4px">
+          <input type="text" id="room0" maxlength="30" placeholder="Nombre de una sala nueva" autocomplete="off" style="flex:1">
+          <button id="enter">Crear</button>
+        </div>
         <div class="hint" id="exists"></div>
-        <div>Salas activas (toca una para entrar)</div>
-        <div class="inset list" id="rooms0" style="height:110px"></div>
-        <button id="enter">Entrar</button>
-        <div class="hint">Sin cuenta ni contraseña. Quien conozca el nombre de una sala puede entrar. Los mensajes no se guardan: solo los ven quienes están conectados.</div>
+        <label class="opt"><input type="checkbox" id="hidden0"> Sala oculta (no aparece en la lista)</label>
+        <div class="hint">Sin cuenta ni contraseña. Los mensajes no se guardan: solo los ven quienes están conectados.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pedir nombre -->
+  <div class="modal" id="ask">
+    <div class="win" style="height:auto;width:min(320px,92%)">
+      <div class="bar"><span>¿Cómo te llamas?</span></div>
+      <div class="login body" style="margin:0;width:auto;padding:14px;display:grid;gap:10px">
+        <div>Vas a entrar a <b id="askroom"></b></div>
+        <input type="text" id="nick" maxlength="20" placeholder="Tu nombre o alias" autocomplete="off">
+        <div style="display:flex;gap:6px;justify-content:flex-end">
+          <button id="askok">Entrar</button>
+          <button id="askno" type="button">Cancelar</button>
+        </div>
       </div>
     </div>
   </div>
@@ -87,6 +101,7 @@
   <div id="app">
     <div class="main">
       <div class="col side" id="side">
+        <button id="back" type="button">← Volver al lobby</button>
         <h3>Salas</h3>
         <div class="inset list" id="rooms"></div>
         <div class="join">
@@ -176,11 +191,7 @@ function renderRooms(){
     sorted.forEach(([r,n])=>{
       const d = el('div', !inLogin && r===current ? 'cur' : '', `#${r} (${n})`);
       d.title = `Entrar a #${r}`;
-      d.onclick = () => {
-        if(!inLogin) return enter(r);
-        $('room0').value = r; updateHints();
-        cleanNick($('nick').value) ? login() : $('nick').focus();
-      };
+      d.onclick = () => inLogin ? ask(r, false) : enter(r);
       box.append(d);
     });
   }
@@ -251,8 +262,9 @@ function submit(text){
         sendHi && sendHi({ nick }); sys(`Ahora eres ${n} (antes ${old})`); renderUsers(); return; }
       case 'me':   if(!arg) return sys('Uso: /me hace algo'); sendMsg({ t: arg, me: 1 }); chat(nick, arg, true); return;
       case 'join': case 'sala': return enter(arg);
+      case 'lobby': return backToLobby();
       case 'ayuda': case 'help':
-        sys('Comandos: /nick alias · /me acción · /join sala · /ayuda'); return;
+        sys('Comandos: /nick alias · /me acción · /join sala · /lobby · /ayuda'); return;
       default: return sys(`Comando desconocido: /${cmd}. Escribe /ayuda`);
     }
   }
@@ -260,16 +272,44 @@ function submit(text){
 }
 
 /* ---------- Eventos ---------- */
-function login(){
+let pending = null;
+function ask(r, hide){
+  pending = { r, hide };
+  $('askroom').textContent = '#' + r;
+  $('nick').value = nick || store.get('nick') || '';
+  $('ask').style.display = 'flex';
+  $('nick').focus(); $('nick').select();
+}
+function confirmNick(){
   const n = cleanNick($('nick').value);
   if(!n){ $('nick').focus(); return; }
   nick = n; store.set('nick', n);
-  const r = cleanRoom($('room0').value) || 'general';
-  $('login').style.display = 'none'; $('app').style.display = 'flex';
+  $('ask').style.display = 'none'; $('login').style.display = 'none'; $('app').style.display = 'flex';
+  $('hidden').checked = pending.hide;
+  const r = pending.r; pending = null;
   enter(r);
 }
-$('enter').onclick = login;
-['nick','room0'].forEach(id => $(id).addEventListener('keydown', e => { if(e.key==='Enter') login(); }));
+async function backToLobby(){
+  if(room){ try{ await room.leave(); }catch{} }
+  room = null; current = null; peers = new Map(); hidden = false; $('hidden').checked = false;
+  announce();
+  $('app').style.display = 'none'; $('login').style.display = '';
+  $('who').textContent = ''; document.title = 'Chat Clásico';
+  history.replaceState(null, '', location.pathname);
+  renderRooms();
+}
+function create(){
+  const r = cleanRoom($('room0').value);
+  if(!r){ $('room0').focus(); return; }
+  $('room0').value = '';
+  ask(r, $('hidden0').checked);
+}
+$('enter').onclick = create;
+$('room0').addEventListener('keydown', e => { if(e.key==='Enter') create(); });
+$('askok').onclick = confirmNick;
+$('askno').onclick = () => { pending = null; $('ask').style.display = 'none'; };
+$('nick').addEventListener('keydown', e => { if(e.key==='Enter') confirmNick(); if(e.key==='Escape') $('askno').click(); });
+$('back').onclick = backToLobby;
 $('go').onclick = () => { const v = $('newroom').value; $('newroom').value=''; enter(v); };
 $('newroom').addEventListener('keydown', e => { if(e.key==='Enter'){ e.preventDefault(); $('go').click(); } });
 $('hidden').onchange = () => { hidden = $('hidden').checked; announce(); renderRooms(); };
@@ -279,10 +319,10 @@ window.addEventListener('hashchange', () => { const r = cleanRoom(location.hash.
 window.addEventListener('pagehide', () => { try{ room && room.leave(); }catch{} });
 
 // Valores iniciales
-$('nick').value = store.get('nick') || '';
-const h0 = cleanRoom(location.hash.slice(1)); if(h0) $('room0').value = h0;
+const h0 = cleanRoom(location.hash.slice(1));
 ['room0','newroom'].forEach(id => $(id).addEventListener('input', updateHints));
 startLobby(); renderRooms();
+if(h0) ask(h0, false);
 </script>
 </body>
 </html>

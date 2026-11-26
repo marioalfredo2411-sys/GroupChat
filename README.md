@@ -4,9 +4,9 @@ Chat con salas al estilo de los chats de los años 90 (mIRC, Windows 98). Se ent
 
 ## Características
 
-- Entrada solo con alias.
-- Cualquiera crea una sala escribiendo un nombre.
-- Lista de salas activas con el número de personas, actualizada en vivo.
+- **Lobby** de inicio con la lista de salas creadas y el número de personas en cada una, actualizada en vivo.
+- Al tocar una sala, la app te pide tu nombre o alias y entras. Sin cuentas ni contraseñas.
+- Cualquiera crea una sala escribiendo un nombre; si ya existe, entra a ella en lugar de crear otra.
 - Salas ocultas que no aparecen en la lista.
 - Enlaces directos a una sala: `https://tu-usuario.github.io/tu-repo/#mi-sala`.
 - Lista de usuarios por sala y avisos de entrada y salida.
@@ -23,9 +23,10 @@ Chat con salas al estilo de los chats de los años 90 (mIRC, Windows 98). Se ent
 
 ## Uso
 
-1. Escribe tu alias y el nombre de una sala (por defecto `general`).
-2. Para crear otra sala, escribe su nombre en **Nueva sala** y pulsa **Ir**, o toca una de la lista.
-3. Para invitar a alguien, comparte el enlace con `#nombre-de-sala` al final.
+1. En el lobby, toca una sala de la lista o escribe un nombre para crear una nueva.
+2. Escribe tu alias cuando la app te lo pida.
+3. Para cambiar de sala, usa la lista del chat o **← Volver al lobby**.
+4. Para invitar a alguien, comparte el enlace con `#nombre-de-sala` al final: al abrirlo le pedirá su nombre y entrará a esa sala.
 
 ### Comandos
 
@@ -34,6 +35,7 @@ Chat con salas al estilo de los chats de los años 90 (mIRC, Windows 98). Se ent
 | `/nick alias` | Cambia tu alias |
 | `/me acción` | Mensaje en tercera persona (`* Ana saluda`) |
 | `/join sala` | Entra a otra sala |
+| `/lobby` | Vuelve al lobby |
 | `/ayuda` | Muestra los comandos |
 
 Los nombres de sala se normalizan: minúsculas, sin tildes, y solo letras, números, `-` y `_` (máximo 30 caracteres).
